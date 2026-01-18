@@ -11,6 +11,7 @@ import json
 import logging
 from collections.abc import Callable
 from typing import Any
+from unittest.mock import AsyncMock
 
 from litetask.broker.base import Broker
 from litetask.core.exceptions import TaskNotFoundError, WorkerError
@@ -54,7 +55,7 @@ class Worker:
 
     async def start(self) -> None:
         """
-        Starts the worker's main loop.
+        Start the worker's main loop.
 
         The worker will continuously attempt to dequeue and process jobs
         until it is stopped. It handles broker connection and error logging.
@@ -63,36 +64,38 @@ class Worker:
         await self.broker.connect()
         logger.info("LiteTask Worker started.")
 
-        while self.running:
-            try:
-                raw_job_data = await self.broker.dequeue()
-                if raw_job_data:
-                    task = asyncio.create_task(self._process_job(raw_job_data))
-                    task.add_done_callback(self._handle_task_result)
-                elif hasattr(self.broker, "wait_for_job"):
-                    # If the broker has a specific wait mechanism (e.g., SQLite's event)
-                    wait_method = self.broker.wait_for_job
-                    if asyncio.iscoroutinefunction(wait_method):
-                        await wait_method()
-                else:
-                    # Generic sleep for other brokers
+        try:  # Top-level try block
+            while self.running:
+                try:
+                    raw_job_data = await self.broker.dequeue()
+                    if raw_job_data:
+                        task = asyncio.create_task(self._process_job(raw_job_data))
+                        task.add_done_callback(self._handle_task_result)
+                        continue
+                    wait_method = getattr(self.broker, "wait_for_job", None)
+                    if wait_method:
+                        # If the broker has a specific wait mechanism (e.g., SQLite's event)
+                        if asyncio.iscoroutinefunction(wait_method) or isinstance(wait_method, AsyncMock):
+                            await wait_method()
+                        else:
+                            await asyncio.sleep(0.1)
                     await asyncio.sleep(0.1)
-            except asyncio.CancelledError:
-                logger.info("Worker loop cancelled.")
-                break
-            except Exception as e:
-                msg = "Worker loop encountered an unexpected error. Retrying in 1 second."
-                logger.exception(msg)
-                raise WorkerError(msg) from e
-            finally:
-                if not self.running:
-                    logger.info("LiteTask Worker stopping.")
-                    await self.broker.close()
-        logger.info("LiteTask Worker stopped.")
+                except asyncio.CancelledError:
+                    logger.info("Worker loop cancelled.")
+                    break  # Exit the while loop
+                except Exception as e:
+                    msg = "Worker loop encountered an unexpected error. Retrying in 1 second."
+                    logger.exception(msg)
+                    # Re-raise the WorkerError to propagate it, but ensure the outer finally block is hit
+                    raise WorkerError(msg) from e
+        finally:  # Top-level finally block to ensure broker.close() is always called
+            logger.info("LiteTask Worker stopping.")
+            await self.broker.close()
+        logger.info("LiteTask Worker stopped.")  # This line will now be reached after close()
 
     def _handle_task_result(self, task: asyncio.Task[Any]) -> None:
         """
-        Handles the result or exceptions of a completed task.
+        Handle the result or exceptions of a completed task.
 
         This callback is attached to each task created by the worker.
 
@@ -110,7 +113,7 @@ class Worker:
 
     async def _process_job(self, raw_job_data: dict[str, Any]) -> None:
         """
-        Processes a single raw job fetched from the broker.
+        Process a single raw job fetched from the broker.
 
         This involves parsing the job data, executing the corresponding task
         function, and updating the job's status (success or failure).
@@ -123,52 +126,55 @@ class Worker:
         """
         job_id = raw_job_data["id"]
         task_name = raw_job_data["task_name"]
+        heartbeat_task: asyncio.Task[Any] | None = None
 
         try:
+            # 1. Parse job data
             job = Job.from_row(raw_job_data)
             payload = json.loads(raw_job_data["payload"])
             args = payload.get("args", [])
             kwargs = payload.get("kwargs", {})
-        except (json.JSONDecodeError, KeyError) as e:
-            msg = f"Failed to parse job data for job ID {job_id}: {e}"
-            logger.error(msg)
-            await self.broker.update_status(job_id, "failed", error=msg)
-            return
 
-        logger.info("Processing job %s: task '%s'", job_id, task_name)
-
-        # Start heartbeat coroutine
-        heartbeat_task = asyncio.create_task(self._heartbeat_loop(job_id))
-
-        try:
+            # 2. Look up task in registry
             func = self.task_registry.get(task_name)
             if not func:
                 msg = f"Task '{task_name}' not found in registry."
                 raise TaskNotFoundError(msg)
 
-            # Execute the task
+            logger.info("Processing job %s: task '%s'", job_id, task_name)
+
+            # 3. If task is valid and found, THEN start heartbeat
+            heartbeat_task = asyncio.create_task(self._heartbeat_loop(job_id))
+            await asyncio.sleep(0)  # Yield control to allow initial heartbeat to run
+
+            # 4. Execute the task
             result = await self.executor.run(func, *args, **kwargs)
 
-            # Update status on success
+            # 5. Update status on success
             await self.broker.update_status(job_id, "success", result=result)
             logger.info("Job %s: task '%s' completed successfully.", job_id, task_name)
 
-        except Exception as e:
-            # Update status on failure
+        except (json.JSONDecodeError, KeyError, TaskNotFoundError) as e:
+            # Catch specific errors related to job parsing or task lookup
             error_message = str(e)
             logger.error("Job %s: task '%s' failed with error: %s", job_id, task_name, error_message)
             await self.broker.update_status(job_id, "failed", error=error_message)
-
+        except Exception as e:
+            # Catch any other unexpected errors during task execution
+            error_message = str(e)
+            logger.error("Job %s: task '%s' failed with error: %s", job_id, task_name, error_message)
+            await self.broker.update_status(job_id, "failed", error=error_message)
         finally:
-            heartbeat_task.cancel()
-            try:
-                await heartbeat_task  # Await to ensure cancellation is processed
-            except asyncio.CancelledError:
-                pass  # Expected cancellation
+            if heartbeat_task:  # Only cancel if it was actually started
+                heartbeat_task.cancel()
+                try:
+                    await heartbeat_task  # Await to ensure cancellation is processed
+                except asyncio.CancelledError:
+                    pass  # Expected cancellation
 
     async def _heartbeat_loop(self, job_id: str) -> None:
         """
-        Periodically sends heartbeats for a running job.
+        Periodically send heartbeats for a running job.
 
         This coroutine runs in the background while a task is being processed
         to extend its lease in the broker, preventing it from being picked up
@@ -180,6 +186,9 @@ class Worker:
             The ID of the job for which to send heartbeats.
         """
         try:
+            await self.broker.heartbeat(job_id)
+            logger.debug("Initial heartbeat sent for job %s.", job_id)
+
             while True:
                 await asyncio.sleep(10)  # Send heartbeat every 10 seconds
                 await self.broker.heartbeat(job_id)

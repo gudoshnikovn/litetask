@@ -45,12 +45,11 @@ class LiteTask:
     def __init__(self, broker_url: str = "sqlite://tasks.db") -> None:
         self.broker: Broker = self._create_broker(broker_url)
         self.tasks: dict[str, Callable[..., Any]] = {}
-        # Worker is decoupled, receiving broker and task_registry directly
         self.worker: Worker = Worker(self.broker, self.tasks)
 
     def _create_broker(self, url: str) -> Broker:
         """
-        Creates a broker instance based on the provided URL.
+        Create a broker instance based on the provided URL.
 
         Parameters
         ----------
@@ -100,9 +99,48 @@ class LiteTask:
             task_name = name or func.__name__
             self.tasks[task_name] = func
 
+            def _create_job_from_task_call(args: list[Any], kwargs: dict[str, Any]) -> Job:
+                """
+                Create a Job object from task call arguments and special kwargs.
+
+                Parameters
+                ----------
+                args : list[Any]
+                    Positional arguments for the task function.
+                kwargs : dict[str, Any]
+                    Keyword arguments for the task function, potentially including
+                    job-specific parameters like `job_id`, `run_at`, etc.
+                    These job-specific parameters will be popped from the dictionary.
+
+                Returns
+                -------
+                Job
+                    A new Job instance.
+                """
+                # Extract job-specific parameters from kwargs
+                explicit_job_id = kwargs.pop("job_id", None)
+                run_at = kwargs.pop("run_at", None)
+                uniqueness_key = kwargs.pop("uniqueness_key", None)
+                group_name = kwargs.pop("group_name", None)
+                retries_count = kwargs.pop("retries_count", 0)
+
+                job_creation_kwargs: dict[str, Any] = {
+                    "task_name": task_name,
+                    "args": args,
+                    "kwargs": kwargs,  # Remaining kwargs are task_kwargs
+                    "run_at": run_at,
+                    "uniqueness_key": uniqueness_key,
+                    "group_name": group_name,
+                    "retries_count": retries_count,
+                }
+                if explicit_job_id is not None:
+                    job_creation_kwargs["id"] = explicit_job_id
+
+                return Job(**job_creation_kwargs)
+
             def delay(*args: Any, **kwargs: Any) -> str:
                 """
-                Synchronously enqueues the task.
+                Synchronously enqueue the task.
 
                 Parameters
                 ----------
@@ -110,18 +148,21 @@ class LiteTask:
                     Positional arguments for the task function.
                 **kwargs : Any
                     Keyword arguments for the task function.
+                    Special keyword arguments like `job_id`, `run_at`, `uniqueness_key`,
+                    `group_name`, and `retries_count` are consumed for Job creation.
 
                 Returns
                 -------
                 str
                     The ID of the enqueued job.
                 """
-                job = Job(task_name=task_name, args=list(args), kwargs=kwargs)
+                # Make a copy of kwargs because pop modifies the dictionary
+                job = _create_job_from_task_call(list(args), kwargs.copy())
                 return self.broker.enqueue_sync(job)
 
             async def adelay(*args: Any, **kwargs: Any) -> str:
                 """
-                Asynchronously enqueues the task.
+                Asynchronously enqueue the task.
 
                 Parameters
                 ----------
@@ -129,13 +170,16 @@ class LiteTask:
                     Positional arguments for the task function.
                 **kwargs : Any
                     Keyword arguments for the task function.
+                    Special keyword arguments like `job_id`, `run_at`, `uniqueness_key`,
+                    `group_name`, and `retries_count` are consumed for Job creation.
 
                 Returns
                 -------
                 str
                     The ID of the enqueued job.
                 """
-                job = Job(task_name=task_name, args=list(args), kwargs=kwargs)
+                # Make a copy of kwargs because pop modifies the dictionary
+                job = _create_job_from_task_call(list(args), kwargs.copy())
                 return await self.broker.enqueue(job)
 
             # Attach delay and adelay methods to the original function
@@ -147,7 +191,7 @@ class LiteTask:
 
     async def run_worker(self) -> None:
         """
-        Starts the LiteTask worker.
+        Start the LiteTask worker.
 
         This method initializes the worker and begins processing tasks from the broker.
         For SQLite brokers, it also registers the current asyncio event loop

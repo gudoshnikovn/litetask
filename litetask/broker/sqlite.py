@@ -1,25 +1,27 @@
-"""
-SQLite broker implementation for LiteTask.
-
-This module provides a `SQLiteBroker` that uses an SQLite database for
-persistent task storage and management. It supports both synchronous and
-asynchronous enqueueing and uses a dedicated writer thread for database operations.
-"""
-
 import asyncio
 import json
 import logging
 import sqlite3
 import threading
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from queue import Queue as SyncQueue
+from queue import Empty as SyncQueueEmpty, Queue as SyncQueue
 from typing import Any, final
 
 from litetask.broker.base import Broker
 from litetask.core.models import Job
 
 logger = logging.getLogger(__name__)
+
+# Define a type alias for the queue item for better readability and type checking
+_QueueItem = tuple[
+    str,  # SQL query string
+    tuple[Any, ...],  # Parameters for the SQL query
+    asyncio.Future[Any] | None,  # Future for async operations
+    asyncio.AbstractEventLoop | None,  # Event loop for async operations
+    Callable[[Any, Exception | None], None] | None,  # Callback for sync operations
+]
 
 
 @final
@@ -39,9 +41,7 @@ class SQLiteBroker(Broker):
 
     def __init__(self, db_path: str) -> None:
         self.db_path: Path = Path(db_path).resolve()
-        self._write_queue: SyncQueue[
-            tuple[str, tuple[Any, ...], asyncio.Future[Any] | None, asyncio.AbstractEventLoop | None] | None
-        ] = SyncQueue()
+        self._write_queue: SyncQueue[_QueueItem | None] = SyncQueue()
         self._new_job_event: asyncio.Event | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._writer_thread: threading.Thread | None = None
@@ -50,7 +50,7 @@ class SQLiteBroker(Broker):
 
     def _ensure_connection(self) -> None:
         """
-        Ensures the writer thread is running and the database is initialized.
+        Ensure the writer thread is running and the database is initialized.
 
         This method is called before any database operation to guarantee
         the broker's readiness.
@@ -67,7 +67,7 @@ class SQLiteBroker(Broker):
 
     async def connect(self) -> None:
         """
-        Initializes the SQLite broker.
+        Initialize the SQLite broker.
 
         Ensures the database connection and tables are set up.
         """
@@ -76,7 +76,7 @@ class SQLiteBroker(Broker):
 
     async def close(self) -> None:
         """
-        Closes the SQLite broker.
+        Close the SQLite broker.
 
         Stops the writer thread and waits for it to terminate.
         """
@@ -92,7 +92,7 @@ class SQLiteBroker(Broker):
 
     def _init_db(self) -> None:
         """
-        Initializes the SQLite database schema.
+        Initialize the SQLite database schema.
 
         Creates the database directory if it doesn't exist and sets up
         the `litetask_jobs` table with necessary indices.
@@ -123,7 +123,7 @@ class SQLiteBroker(Broker):
 
     def set_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         """
-        Registers the worker's asyncio event loop.
+        Register the worker's asyncio event loop.
 
         This allows the broker to notify the worker about new jobs from
         synchronous enqueue operations.
@@ -142,27 +142,47 @@ class SQLiteBroker(Broker):
         The target function for the dedicated writer thread.
 
         This thread continuously pulls database operations from `_write_queue`
-        and executes them, then sets the result on the corresponding future.
+        and executes them, then sets the result on the corresponding future or
+        calls the synchronous callback.
         """
         conn = sqlite3.connect(self.db_path, isolation_level=None, check_same_thread=False)
+        conn.row_factory = sqlite3.Row  # Ensure rows are returned as dict-like objects
+
         while self._running:
-            item = self._write_queue.get()
+            try:
+                item = self._write_queue.get(timeout=0.1)
+            except SyncQueueEmpty:
+                continue
+
             if item is None:  # Poison pill
                 break
-            sql, params, future, loop = item
+
+            sql, params, future, loop, sync_callback = item
+            res: Any = None
+            exc: Exception | None = None
+
             try:
                 cursor = conn.execute(sql, params)
-                res: Any
-                if sql.strip().upper().startswith("SELECT") or "RETURNING" in sql.upper():
+                is_select = sql.strip().upper().startswith("SELECT") or "RETURNING" in sql.upper()
+
+                if is_select:
                     res = cursor.fetchall()
                 else:
-                    res = cursor.lastrowid
+                    conn.commit()  # Explicitly commit changes for non-SELECT operations
+                    res = cursor.lastrowid if cursor.lastrowid is not None else None
+
                 if future and loop:
                     loop.call_soon_threadsafe(future.set_result, res)
+                elif sync_callback:  # Handle synchronous callback
+                    sync_callback(res, None)
+
             except Exception as e:
                 logger.exception("Error in SQLite writer thread executing SQL: %s", sql)
+                exc = e
                 if future and loop:
                     loop.call_soon_threadsafe(future.set_exception, e)
+                elif sync_callback:  # Handle synchronous callback with error
+                    sync_callback(None, e)
             finally:
                 self._write_queue.task_done()
         conn.close()
@@ -170,7 +190,7 @@ class SQLiteBroker(Broker):
 
     def _notify_worker(self) -> None:
         """
-        Notifies the worker about new jobs if its event loop is registered.
+        Notify the worker about new jobs if its event loop is registered.
 
         This wakes up the worker if it's waiting for new tasks.
         """
@@ -180,7 +200,7 @@ class SQLiteBroker(Broker):
 
     async def enqueue(self, job: Job) -> str:
         """
-        Asynchronously enqueues a job into the SQLite broker.
+        Asynchronously enqueue a job into the SQLite broker.
 
         The job is added to an internal queue for the writer thread to process.
 
@@ -197,7 +217,14 @@ class SQLiteBroker(Broker):
         self._ensure_connection()
         loop = asyncio.get_running_loop()
         fut: asyncio.Future[Any] = loop.create_future()
-        self._put_in_queue(job, fut, loop)
+
+        payload = json.dumps({"args": job.args, "kwargs": job.kwargs})
+        sql = "INSERT INTO litetask_jobs (id, task_name, payload, run_at, created_at) VALUES (?, ?, ?, ?, ?)"
+        run_at_str = job.run_at.isoformat() if job.run_at else None
+        created_at_str = job.created_at.isoformat() if job.created_at else None
+        params = (job.id, job.task_name, payload, run_at_str, created_at_str)
+
+        self._write_queue.put((sql, params, fut, loop, None))
         await fut
         self._notify_worker()
         logger.debug("Job %s enqueued asynchronously.", job.id)
@@ -205,10 +232,10 @@ class SQLiteBroker(Broker):
 
     def enqueue_sync(self, job: Job) -> str:
         """
-        Synchronously enqueues a job into the SQLite broker.
+        Synchronously enqueue a job into the SQLite broker.
 
         The job is added to an internal queue for the writer thread to process.
-        This method does not wait for the database write to complete.
+        This method blocks until the database write operation is confirmed.
 
         Parameters
         ----------
@@ -221,35 +248,34 @@ class SQLiteBroker(Broker):
             The ID of the enqueued job.
         """
         self._ensure_connection()
-        self._put_in_queue(job, None, None)
-        self._notify_worker()
+        sync_event = threading.Event()
+        exception_container: list[Exception] = []
+
+        def callback(res: Any, exc: Exception | None) -> None:
+            if exc:
+                exception_container.append(exc)
+            sync_event.set()
+
+        payload = json.dumps({"args": job.args, "kwargs": job.kwargs})
+        sql = "INSERT INTO litetask_jobs (id, task_name, payload, run_at, created_at) VALUES (?, ?, ?, ?, ?)"
+        run_at_str = job.run_at.isoformat() if job.run_at else None
+        created_at_str = job.created_at.isoformat() if job.created_at else None
+        params = (job.id, job.task_name, payload, run_at_str, created_at_str)
+
+        self._write_queue.put((sql, params, None, None, callback))
+
+        sync_event.wait()  # Block until the writer thread signals completion
+
+        if exception_container:
+            raise exception_container[0]
+
+        self._notify_worker()  # Notify worker AFTER the job is committed
         logger.debug("Job %s enqueued synchronously.", job.id)
         return job.id
 
-    def _put_in_queue(self, job: Job, fut: asyncio.Future[Any] | None, loop: asyncio.AbstractEventLoop | None) -> None:
-        """
-        Puts a job into the writer thread's queue for database insertion.
-
-        Parameters
-        ----------
-        job : Job
-            The job object to insert.
-        fut : asyncio.Future[Any] | None
-            The future to set the result on, if an asynchronous operation.
-        loop : asyncio.AbstractEventLoop | None
-            The event loop associated with the future.
-        """
-        payload = json.dumps({"args": job.args, "kwargs": job.kwargs})
-        sql = "INSERT INTO litetask_jobs (id, task_name, payload, run_at, created_at) VALUES (?, ?, ?, ?, ?)"
-
-        # SQLite handles datetime objects directly for TIMESTAMP columns
-        run_at_dt = job.run_at or datetime.now(timezone.utc)
-
-        self._write_queue.put((sql, (job.id, job.task_name, payload, run_at_dt, job.created_at), fut, loop))
-
     async def wait_for_job(self) -> None:
         """
-        Waits for a notification that a new job has been enqueued.
+        Wait for a notification that a new job has been enqueued.
 
         This method is specific to the SQLite broker and helps the worker
         efficiently wait for new tasks without busy-waiting.
@@ -267,7 +293,7 @@ class SQLiteBroker(Broker):
 
     async def dequeue(self) -> dict[str, Any] | None:
         """
-        Asynchronously dequeues a job from the SQLite broker.
+        Asynchronously dequeue a job from the SQLite broker.
 
         It attempts to find a pending job, updates its status to 'running',
         sets a lease expiration, and returns its details.
@@ -280,10 +306,9 @@ class SQLiteBroker(Broker):
         """
         loop = asyncio.get_running_loop()
         fut: asyncio.Future[Any] = loop.create_future()
-        # Selects a pending job, updates its status to 'running', and sets lease_expires_at.
-        # RETURNING clause fetches the updated job details.
-        lease_expires_at = datetime.now(timezone.utc) + timedelta(seconds=30)
-        heartbeat_at = datetime.now(timezone.utc)
+
+        lease_expires_at_str = (datetime.now(timezone.utc) + timedelta(seconds=30)).isoformat()
+        heartbeat_at_str = datetime.now(timezone.utc).isoformat()
 
         sql = """
             UPDATE litetask_jobs
@@ -300,34 +325,19 @@ class SQLiteBroker(Broker):
                       status, retries_count, uniqueness_key, group_name, run_at,
                       result, error, created_at;
         """
-        self._write_queue.put((sql, (lease_expires_at, heartbeat_at, datetime.now(timezone.utc)), fut, loop))
+        self._write_queue.put(
+            (sql, (lease_expires_at_str, heartbeat_at_str, datetime.now(timezone.utc).isoformat()), fut, loop, None),
+        )
         rows = await fut
         if rows:
-            job_data = rows[0]
-            # Map the returned row to a dictionary for Job.from_row
-            columns = [
-                "id",
-                "task_name",
-                "payload",
-                "lease_expires_at",
-                "heartbeat_at",
-                "status",
-                "retries_count",
-                "uniqueness_key",
-                "group_name",
-                "run_at",
-                "result",
-                "error",
-                "created_at",
-            ]
-            result_dict = dict(zip(columns, job_data))
+            result_dict = dict(rows[0])
             logger.debug("Job %s dequeued.", result_dict["id"])
             return result_dict
         return None
 
     async def update_status(self, job_id: str, status: str, result: Any = None, error: str | None = None) -> None:
         """
-        Asynchronously updates the status of a job in the SQLite broker.
+        Asynchronously update the status of a job in the SQLite broker.
 
         Parameters
         ----------
@@ -336,21 +346,35 @@ class SQLiteBroker(Broker):
         status : str
             The new status of the job.
         result : Any, optional
-            The result of the job execution. Defaults to None.
+            The result of the job execution. If provided, updates the result.
+            If None, the result field in the database is not changed.
         error : str | None, optional
-            An error message if the job failed. Defaults to None.
+            An error message if the job failed. If provided, updates the error.
+            If None, the error field in the database is not changed.
         """
         loop = asyncio.get_running_loop()
         fut: asyncio.Future[Any] = loop.create_future()
-        sql = "UPDATE litetask_jobs SET status=?, result=?, error=? WHERE id=?"
-        result_json = json.dumps(result) if result is not None else None
-        self._write_queue.put((sql, (status, result_json, error, job_id), fut, loop))
+
+        set_clauses = ["status=?"]
+        params: list[Any] = [status]
+
+        if result is not None:
+            set_clauses.append("result=?")
+            params.append(json.dumps(result))
+        if error is not None:
+            set_clauses.append("error=?")
+            params.append(error)
+
+        sql = f"UPDATE litetask_jobs SET {', '.join(set_clauses)} WHERE id=?"
+        params.append(job_id)
+
+        self._write_queue.put((sql, tuple(params), fut, loop, None))
         await fut
         logger.debug("Job %s status updated to %s.", job_id, status)
 
     async def heartbeat(self, job_id: str) -> None:
         """
-        Asynchronously sends a heartbeat for a running job in the SQLite broker.
+        Asynchronously send a heartbeat for a running job in the SQLite broker.
 
         Updates the `lease_expires_at` and `heartbeat_at` fields for the specified job.
 
@@ -361,9 +385,9 @@ class SQLiteBroker(Broker):
         """
         loop = asyncio.get_running_loop()
         fut: asyncio.Future[Any] = loop.create_future()
-        lease_expires_at = datetime.now(timezone.utc) + timedelta(seconds=30)
-        heartbeat_at = datetime.now(timezone.utc)
+        lease_expires_at_str = (datetime.now(timezone.utc) + timedelta(seconds=30)).isoformat()
+        heartbeat_at_str = datetime.now(timezone.utc).isoformat()
         sql = "UPDATE litetask_jobs SET lease_expires_at = ?, heartbeat_at = ? WHERE id = ?"
-        self._write_queue.put((sql, (lease_expires_at, heartbeat_at, job_id), fut, loop))
+        self._write_queue.put((sql, (lease_expires_at_str, heartbeat_at_str, job_id), fut, loop, None))
         await fut
         logger.debug("Heartbeat sent for job %s.", job_id)
