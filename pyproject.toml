@@ -1,0 +1,161 @@
+[project]
+name = "litetask"
+version = "0.1.0"
+description = "LiteTask: A simple, lightweight, and versatile library for creating and managing tasks."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
+
+[dependency-groups]
+dev = ["basedpyright>=1.37.1", "ruff>=0.14.13"]
+
+[tool.basedpyright]
+pythonVersion = "3.12.*"
+reportMissingTypeStubs = "hint"
+typeCheckingMode = "standard"
+analyzeUnannotatedFunctions = true
+reportGeneralTypeIssues = true
+reportMissingParameterType = false
+reportIncompatibleVariableOverride = false
+reportUnusedImport = "error"
+reportUnusedClass = "error"
+reportUnusedFunction = "error"
+reportUnusedVariable = "error"
+reportUnusedParameter = "none"
+
+[tool.ruff]
+target-version = "py310"
+fix = true
+extend-exclude = [".venv"]
+line-length = 120
+indent-width = 4
+
+[tool.ruff.format]
+docstring-code-line-length = 120
+quote-style = "double"
+skip-magic-trailing-comma = true
+indent-style = "space"
+line-ending = "auto"
+
+[tool.ruff.lint]
+exclude = ["*.ipynb"]
+
+select = [
+  "ERA",
+  "ANN",
+  "ASYNC",
+  "S",
+  "BLE",
+  "FBT",
+  "B",
+  "A",
+  "COM",
+  "C4",
+  "DTZ",
+  "T10",
+  "EM",
+  "FIX",
+  "ISC",
+  "ICN",
+  "LOG",
+  "PIE",
+  "T20",
+  "PYI",
+  "PT",
+  "Q",
+  "RSE",
+  "RET",
+  "SLF",
+  "SIM",
+  "SLOT",
+  "TID",
+  "TD",
+  "TC",
+  "ARG",
+  "PTH",
+  "FLY",
+  "I",
+  "C90",
+  "NPY",
+  "PD",
+  "N",
+  "PERF",
+  "E",
+  "W",
+  "D",
+  "F",
+  "PGH",
+  "PL",
+  "UP",
+  "FURB",
+  "RUF",
+  "TRY",
+]
+
+ignore = [
+  "ANN002", # Typing for *args.
+  "ANN003", # Typing for **kwargs.
+
+  "PT011", # Checks for pytest.raises calls without a match parameter.
+
+  "D107", # Undocumented __init__ - we document in class.
+  "D203", # 1 blank line required before class docstring.
+  "D212", # Multi-line docstring summary should start at the second line.
+  "D413", # missing-blank-line-after-last-section.
+
+  "E501", # Line too long. Need to be ignored for autofix to work.
+
+  "FBT001", # Boolean in function. We allow it.
+  "FBT002", # Boolean in function. We allow it.
+
+  "UP038", # Deprecated.
+]
+
+
+# dummy-variable-rgx: A regular expression used to identify "dummy" variables,
+# or those which should be ignored when enforcing (e.g.) unused-variable rules.
+# Default value: "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
+dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?)|args|kwargs)$"
+
+[tool.ruff.lint.per-file-ignores]
+"**/{tests,research_tests,custom_admins_tests,ab_testing}/*" = ["S101", "S106"]
+"**/create_mockdata*.py" = ["I001"]
+
+
+[tool.ruff.lint.flake8-bandit]
+check-typed-exception = true
+
+[tool.ruff.lint.isort]
+force-wrap-aliases = false
+split-on-trailing-comma = false
+combine-as-imports = true
+length-sort = false
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"typing.Optional".msg = "Use Union Type Expression. X | Y. PEP604"
+"typing.List".msg = "Use list instead of typing.List (deprecated in Python 3.9)."
+"typing.Dict".msg = "Use dict instead of typing.Dict (deprecated in Python 3.9)."
+"typing.Tuple".msg = "Use tuple instead of typing.Tuple (deprecated in Python 3.9)."
+"typing.Set".msg = "Use set instead of typing.Set (deprecated in Python 3.9)."
+"typing.FrozenSet".msg = "Use frozenset instead of typing.FrozenSet (deprecated in Python 3.9)."
+"typing.Deque".msg = "Use collections.deque instead of typing.Deque (deprecated in Python 3.9)."
+"typing.DefaultDict".msg = "Use collections.defaultdict instead of typing.DefaultDict (deprecated in Python 3.9)."
+"typing.OrderedDict".msg = "Use collections.OrderedDict instead of typing.OrderedDict (deprecated in Python 3.9)."
+"typing.Counter".msg = "Use collections.Counter instead of typing.Counter (deprecated in Python 3.9)."
+"typing.ChainMap".msg = "Use collections.ChainMap instead of typing.ChainMap (deprecated in Python 3.9)."
+"typing.AsyncIterator".msg = "Use collections.abc.AsyncIterator instead of typing.AsyncIterator (deprecated in Python 3.10)."
+"typing.AsyncIterable".msg = "Use collections.abc.AsyncIterable instead of typing.AsyncIterable (deprecated in Python 3.10)."
+"typing.Awaitable".msg = "Use collections.abc.Awaitable instead of typing.Awaitable (deprecated in Python 3.10)."
+"typing.Coroutine".msg = "Use collections.abc.Coroutine instead of typing.Coroutine (deprecated in Python 3.10)."
+"typing.Collection".msg = "Use collections.abc.Collection instead of typing.Collection (deprecated in Python 3.9)."
+"typing.Container".msg = "Use collections.abc.Container instead of typing.Container (deprecated in Python 3.9)."
+"typing.Iterable".msg = "Use collections.abc.Iterable instead of typing.Iterable (deprecated in Python 3.9)."
+"typing.Iterator".msg = "Use collections.abc.Iterator instead of typing.Iterator (deprecated in Python 3.9)."
+"typing.Mapping".msg = "Use collections.abc.Mapping instead of typing.Mapping (deprecated in Python 3.9)."
+"typing.MutableMapping".msg = "Use collections.abc.MutableMapping instead of typing.MutableMapping (deprecated in Python 3.9)."
+"typing.Sequence".msg = "Use collections.abc.Sequence instead of typing.Sequence (deprecated in Python 3.9)."
+"typing.MutableSequence".msg = "Use collections.abc.MutableSequence instead of typing.MutableSequence (deprecated in Python 3.9)."
+"typing.MutableSet".msg = "Use collections.abc.MutableSet instead of typing.MutableSet (deprecated in Python 3.9)."
+"typing.KeysView".msg = "Use collections.abc.KeysView instead of typing.KeysView (deprecated in Python 3.9)."
+"typing.ItemsView".msg = "Use collections.abc.ItemsView instead of typing.ItemsView (deprecated in Python 3.9)."
+"typing.ValuesView".msg = "Use collections.abc.ValuesView instead of typing.ValuesView (deprecated in Python 3.9)."
