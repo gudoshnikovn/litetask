@@ -15,6 +15,52 @@ from uuid import uuid4
 logger = logging.getLogger(__name__)
 
 
+def _parse_datetime_string(dt_val: str | datetime | None) -> datetime | None:
+    """
+    Parse a datetime string into a timezone-aware UTC datetime object.
+
+    Handles ISO 8601 format and common SQLite datetime formats.
+    If the string is naive, it is assumed to be UTC.
+
+    Parameters
+    ----------
+    dt_val : str | datetime | None
+        The datetime value to parse. Can be a string, a datetime object, or None.
+
+    Returns
+    -------
+    datetime | None
+        A timezone-aware UTC datetime object, or None if the input is None.
+
+    Raises
+    ------
+    ValueError
+        If the datetime string cannot be parsed.
+    """
+    if isinstance(dt_val, datetime):
+        # If it's already a datetime object, ensure it's UTC-aware
+        return dt_val.astimezone(timezone.utc) if dt_val.tzinfo is None else dt_val
+    if isinstance(dt_val, str):
+        try:
+            # Attempt to parse as ISO 8601 (handles 'T' and 'Z' or offset)
+            # Note: fromisoformat can parse 'YYYY-MM-DD HH:MM:SS.ffffff' as naive datetime
+            dt_obj = datetime.fromisoformat(dt_val)
+            # If parsed successfully but is naive, assume UTC
+            return dt_obj.replace(tzinfo=timezone.utc) if dt_obj.tzinfo is None else dt_obj
+        except ValueError:
+            # If fromisoformat fails, try common SQLite formats
+            for fmt in ["%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"]:
+                try:
+                    dt_obj = datetime.strptime(dt_val, fmt)
+                    return dt_obj.replace(tzinfo=timezone.utc)
+                except ValueError:
+                    continue
+        msg = f"Failed to parse datetime string: '{dt_val}'"
+        logger.error(msg)
+        raise ValueError(msg)
+    return None
+
+
 @dataclass
 class Job:
     """
@@ -81,7 +127,7 @@ class Job:
     @classmethod
     def from_row(cls, row: dict[str, Any]) -> "Job":
         """
-        Parses a dictionary row (e.g., from SQLite `row_factory=sqlite3.Row`)
+        Parse a dictionary row (e.g., from SQLite `row_factory=sqlite3.Row`)
         into a Job object.
 
         This method attempts to parse datetime strings from various common formats,
@@ -100,42 +146,19 @@ class Job:
         """
         payload_data = json.loads(row.get("payload", "{}"))
 
-        def parse_datetime(dt_val: str | datetime | None) -> datetime | None:
-            if isinstance(dt_val, datetime):
-                return dt_val.astimezone(timezone.utc) if dt_val.tzinfo is None else dt_val
-            if isinstance(dt_val, str):
-                try:
-                    # Try parsing ISO 8601 with T and Z/offset first (from Python's isoformat)
-                    return datetime.fromisoformat(dt_val)
-                except ValueError:
-                    # If that fails, try parsing SQLite's DATETIME('NOW', 'UTC') format
-                    # which is 'YYYY-MM-DD HH:MM:SS.SSS' (naive, then make UTC)
-                    try:
-                        dt_obj = datetime.strptime(dt_val, "%Y-%m-%d %H:%M:%S.%f")
-                        return dt_obj.replace(tzinfo=timezone.utc)
-                    except ValueError:
-                        try:
-                            # Try parsing without microseconds
-                            dt_obj = datetime.strptime(dt_val, "%Y-%m-%d %H:%M:%S")
-                            return dt_obj.replace(tzinfo=timezone.utc)
-                        except ValueError:
-                            logger.error("Failed to parse datetime string: '%s'", dt_val)
-                            raise  # Re-raise to show the original error
-            return None
-
         return cls(
             id=row["id"],
             task_name=row["task_name"],
             args=payload_data.get("args", []),
             kwargs=payload_data.get("kwargs", {}),
             status=row.get("status", "pending"),
-            lease_expires_at=parse_datetime(row.get("lease_expires_at")),
-            heartbeat_at=parse_datetime(row.get("heartbeat_at")),
+            lease_expires_at=_parse_datetime_string(row.get("lease_expires_at")),
+            heartbeat_at=_parse_datetime_string(row.get("heartbeat_at")),
             retries_count=row.get("retries_count", 0),
             uniqueness_key=row.get("uniqueness_key"),
             group_name=row.get("group_name"),
-            run_at=parse_datetime(row.get("run_at")),
+            run_at=_parse_datetime_string(row.get("run_at")),
             result=json.loads(row["result"]) if row.get("result") else None,
             error=row.get("error"),
-            created_at=parse_datetime(row.get("created_at")) or datetime.now(timezone.utc),
+            created_at=_parse_datetime_string(row.get("created_at")) or datetime.now(timezone.utc),
         )

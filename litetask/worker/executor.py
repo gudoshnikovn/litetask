@@ -15,7 +15,7 @@ from typing import Any
 
 class TaskExecutor:
     """
-    Manages the execution of task functions.
+    Manage the execution of task functions.
 
     It can execute both coroutine functions (awaiting them directly)
     and regular synchronous functions (running them in a thread pool).

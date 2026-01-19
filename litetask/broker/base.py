@@ -45,7 +45,7 @@ class Broker(ABC):
     @abstractmethod
     async def enqueue(self, job: Job) -> str:
         """
-        Asynchronously enqueues a job into the broker.
+        Asynchronously enqueue a job into the broker.
 
         Parameters
         ----------
@@ -63,7 +63,7 @@ class Broker(ABC):
     @abstractmethod
     def enqueue_sync(self, job: Job) -> str:
         """
-        Synchronously enqueues a job into the broker.
+        Synchronously enqueue a job into the broker.
 
         Parameters
         ----------
@@ -81,7 +81,7 @@ class Broker(ABC):
     @abstractmethod
     async def dequeue(self) -> dict[str, Any] | None:
         """
-        Asynchronously dequeues a job from the broker.
+        Asynchronously dequeue a job from the broker.
 
         This method should retrieve the next available job for processing.
 
@@ -98,7 +98,7 @@ class Broker(ABC):
     @abstractmethod
     async def update_status(self, job_id: str, status: str, result: Any = None, error: str | None = None) -> None:
         """
-        Asynchronously updates the status of a job.
+        Asynchronously update the status of a job.
 
         Parameters
         ----------
@@ -117,7 +117,7 @@ class Broker(ABC):
     @abstractmethod
     async def heartbeat(self, job_id: str) -> None:
         """
-        Asynchronously sends a heartbeat for a running job.
+        Asynchronously send a heartbeat for a running job.
 
         This method is used by workers to indicate that a job is still active
         and to extend its lease, preventing it from being re-queued by other workers.

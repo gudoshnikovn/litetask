@@ -9,6 +9,7 @@ where persistence is not required.
 import asyncio
 import json
 import logging
+from datetime import datetime, timezone
 from typing import Any, final
 
 from litetask.broker.base import Broker
@@ -34,7 +35,7 @@ class MemoryBroker(Broker):
 
     async def connect(self) -> None:
         """
-        Initializes the memory broker.
+        Initialize the memory broker.
 
         Sets the internal stopped flag to False.
         """
@@ -43,7 +44,7 @@ class MemoryBroker(Broker):
 
     async def close(self) -> None:
         """
-        Closes the memory broker.
+        Close the memory broker.
 
         Sets the internal stopped flag to True, preventing further dequeues.
         """
@@ -52,7 +53,7 @@ class MemoryBroker(Broker):
 
     async def enqueue(self, job: Job) -> str:
         """
-        Asynchronously enqueues a job into the memory broker.
+        Asynchronously enqueue a job into the memory broker.
 
         The job is stored in an internal dictionary and its ID is added to the queue.
 
@@ -73,7 +74,7 @@ class MemoryBroker(Broker):
 
     def enqueue_sync(self, job: Job) -> str:
         """
-        Synchronously enqueues a job into the memory broker.
+        Synchronously enqueue a job into the memory broker.
 
         The job is stored in an internal dictionary and its ID is added to the queue
         using `put_nowait`. If the queue is full, the job is still stored but
@@ -99,7 +100,7 @@ class MemoryBroker(Broker):
 
     async def dequeue(self) -> dict[str, Any] | None:
         """
-        Asynchronously dequeues a job from the memory broker.
+        Asynchronously dequeue a job from the memory broker.
 
         Waits for a job ID from the internal queue for a short timeout.
         If a job is found, its payload is emulated as a JSON string.
@@ -140,7 +141,7 @@ class MemoryBroker(Broker):
 
     async def update_status(self, job_id: str, status: str, result: Any = None, error: str | None = None) -> None:
         """
-        Asynchronously updates the status of a job in the memory broker.
+        Asynchronously update the status of a job in the memory broker.
 
         Parameters
         ----------
@@ -163,7 +164,7 @@ class MemoryBroker(Broker):
 
     async def heartbeat(self, job_id: str) -> None:
         """
-        Sends a heartbeat for a running job in the memory broker.
+        Send a heartbeat for a running job in the memory broker.
 
         In a memory broker, this method primarily serves to fulfill the `Broker`
         interface, as lease management is not typically required for in-memory tasks.
@@ -175,7 +176,7 @@ class MemoryBroker(Broker):
             The ID of the job for which to send a heartbeat.
         """
         if job_id in self.jobs:
-            self.jobs[job_id].heartbeat_at = asyncio.current_datetime()
+            self.jobs[job_id].heartbeat_at = datetime.now(timezone.utc)
             logger.debug("Heartbeat received for job %s.", job_id)
         else:
             logger.warning("Heartbeat received for non-existent job ID %s.", job_id)
